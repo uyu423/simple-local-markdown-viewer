@@ -1,0 +1,14 @@
+node_modules/
+
+# Vite cache
+node_modules/.vite/
+
+# Local environment files
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Local agent/runtime artifacts
+.omc/
