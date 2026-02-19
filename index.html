@@ -44,17 +44,21 @@
         <div class="sidebar-header">
           <div class="sidebar-title-row">
             <span id="rootName">folder</span>
+            <div class="title-actions">
+              <button id="refreshBtn" class="action-btn" aria-label="새로고침" data-tooltip="새로고침"></button>
+              <button id="changeFolderBtn" class="action-btn" aria-label="폴더 변경" data-tooltip="폴더 변경"></button>
+              <label id="folderChangeFallbackLabel" class="action-btn" style="cursor:pointer" aria-label="폴더 변경 (파일 선택)" data-tooltip="폴더 변경 (파일 선택)">
+                <input type="file" id="folderChange" webkitdirectory multiple hidden>
+              </label>
+            </div>
           </div>
           <div class="sidebar-actions">
-            <button id="viewModeBtn" class="action-btn" aria-label="최근 업데이트 순" data-tooltip="최근 업데이트 순">&#x1F552;</button>
-            <button id="foldAllBtn" class="action-btn" aria-label="모두 접기" data-tooltip="모두 접기">&#x25B6;</button>
-            <button id="unfoldAllBtn" class="action-btn" aria-label="모두 펼치기" data-tooltip="모두 펼치기">&#x25BC;</button>
-            <button id="themeToggle" class="action-btn" aria-label="테마 변경" data-tooltip="테마 변경">&#x263E;</button>
-            <button id="refreshBtn" class="action-btn" aria-label="선택된 디렉토리 새로고침" data-tooltip="선택된 디렉토리 새로고침">&#x21BB;</button>
-            <button id="changeFolderBtn" class="action-btn" aria-label="폴더 변경" data-tooltip="폴더 변경">&#x1F4C2;</button>
-            <label class="action-btn" aria-label="폴더 변경 (파일 선택)" data-tooltip="폴더 변경 (파일 선택)">
-              <input type="file" id="folderChange" webkitdirectory multiple hidden>
-            </label>
+            <button id="viewModeBtn" class="action-btn" aria-label="최근 업데이트 순" data-tooltip="최근 업데이트 순"></button>
+            <button id="foldAllBtn" class="action-btn" aria-label="모두 접기" data-tooltip="모두 접기"></button>
+            <button id="unfoldAllBtn" class="action-btn" aria-label="모두 펼치기" data-tooltip="모두 펼치기"></button>
+            <button id="hiddenToggleBtn" class="action-btn" aria-label="숨김 파일 표시" data-tooltip="숨김 파일 표시"></button>
+            <span class="action-spacer"></span>
+            <button id="themeToggle" class="action-btn" aria-label="테마 변경" data-tooltip="테마 변경"></button>
           </div>
         </div>
         <div id="searchBox">

@@ -61,19 +61,20 @@ export async function scanDirectoryHandle(dirHandle, prefix = '') {
   const results = [];
   for await (const entry of dirHandle.values()) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const isHiddenEntry = entry.name.startsWith('.');
     if (entry.kind === 'file' && isAllowedFile(entry.name)) {
       const file = await entry.getFile();
       results.push({
         path,
         lastModified: file.lastModified,
+        hidden: isHiddenEntry,
         read: () => file.text(),
       });
-    } else if (
-      entry.kind === 'directory' &&
-      !entry.name.startsWith('.') &&
-      entry.name !== 'node_modules'
-    ) {
+    } else if (entry.kind === 'directory' && entry.name !== 'node_modules') {
       const children = await scanDirectoryHandle(entry, path);
+      if (isHiddenEntry) {
+        children.forEach(c => { c.hidden = true; });
+      }
       results.push(...children);
     }
   }
@@ -87,16 +88,18 @@ export function scanInputFiles(fileList) {
   return Array.from(fileList)
     .filter((f) => {
       const parts = f.webkitRelativePath.split('/');
-      return (
-        isAllowedFile(f.name) &&
-        !parts.some((p) => p.startsWith('.') || p === 'node_modules')
-      );
+      return isAllowedFile(f.name) && !parts.some((p) => p === 'node_modules');
     })
-    .map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'),
-      lastModified: f.lastModified,
-      read: () => f.text(),
-    }));
+    .map((f) => {
+      const pathParts = f.webkitRelativePath.split('/').slice(1);
+      const isHidden = pathParts.some(p => p.startsWith('.'));
+      return {
+        path: pathParts.join('/'),
+        lastModified: f.lastModified,
+        hidden: isHidden,
+        read: () => f.text(),
+      };
+    });
 }
 
 export { supportsDirectoryPicker };

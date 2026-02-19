@@ -11,6 +11,21 @@ import {
   scanInputFiles,
 } from './directory.js';
 
+// === SVG Icon constants ===
+const ICONS = {
+  folder: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.5l1.5 1.5h7v7.5h-13z"/></svg>`,
+  clock: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5l2.5 1.5"/></svg>`,
+  collapseAll: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10l5-3.5 5 3.5"/><path d="M3 6.5l5-3.5 5 3.5"/></svg>`,
+  expandAll: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5.5l5 3.5 5-3.5"/><path d="M3 9l5 3.5 5-3.5"/></svg>`,
+  eye: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/><circle cx="8" cy="8" r="2"/></svg>`,
+  eyeOff: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="14" y2="14"/><path d="M4 4.4C2.7 5.4 1.5 7 1 8c1 2 3.5 4.5 7 4.5 1.5 0 2.8-.4 3.9-1M7.5 3.5c.2 0 .3 0 .5 0 3.5 0 6 3.5 7 5-.4.7-1 1.5-1.7 2.1"/><path d="M6.5 6.6A2 2 0 0 0 9.4 9.4"/></svg>`,
+  refresh: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4.5A5.5 5.5 0 1 0 13.5 8"/><path d="M13.5 1.5v3.5H10"/></svg>`,
+  folderOpen: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.5l1.5 1.5h7v2"/><path d="M1.5 8l1.5 5.5h10l1.5-5.5z"/></svg>`,
+  moon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 10A6 6 0 0 1 6 2.5a5.5 5.5 0 1 0 7.5 7.5z"/></svg>`,
+  sun: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.6 3.6l1 1M11.4 11.4l1 1M3.6 12.4l1-1M11.4 4.6l1-1"/></svg>`,
+  monitor: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1" y="2" width="14" height="9.5" rx="1.5"/><path d="M5.5 14.5h5M8 11.5v3"/></svg>`,
+};
+
 // Configure marked with highlight.js
 marked.setOptions({
   highlight(code, lang) {
@@ -45,7 +60,9 @@ const loadingText = document.getElementById('loadingText');
 const viewModeBtn = document.getElementById('viewModeBtn');
 const foldAllBtn = document.getElementById('foldAllBtn');
 const unfoldAllBtn = document.getElementById('unfoldAllBtn');
+const hiddenToggleBtn = document.getElementById('hiddenToggleBtn');
 const refreshBtn = document.getElementById('refreshBtn');
+const changeFolderBtn = document.getElementById('changeFolderBtn');
 
 // State
 let pendingHandle = null;
@@ -55,6 +72,13 @@ let currentHandle = null;
 let currentFilePath = '';
 let autoRefreshTimer = null;
 let isAutoRefreshing = false;
+let showHiddenFiles = localStorage.getItem('md-viewer-show-hidden') === 'true';
+let readHistory;
+try {
+  readHistory = JSON.parse(localStorage.getItem('md-viewer-read-history') || '{}');
+} catch {
+  readHistory = {};
+}
 
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
 
@@ -124,7 +148,7 @@ folderChange.addEventListener('change', (e) => {
   showEditor(rootName, mdFiles);
 });
 
-document.getElementById('changeFolderBtn')?.addEventListener('click', async () => {
+changeFolderBtn?.addEventListener('click', async () => {
   if (!supportsDirectoryPicker) return;
   try {
     const handle = await pickDirectoryNative();
@@ -261,7 +285,7 @@ function extractFirstLine(text) {
 
 // === Build tree structure from flat file list ===
 function buildTree(files) {
-  const root = { children: new Map(), files: [] };
+  const root = { children: new Map(), files: [], hidden: false };
 
   for (const f of files) {
     const parts = f.path.split('/');
@@ -269,7 +293,11 @@ function buildTree(files) {
 
     for (let i = 0; i < parts.length - 1; i++) {
       if (!current.children.has(parts[i])) {
-        current.children.set(parts[i], { children: new Map(), files: [] });
+        current.children.set(parts[i], {
+          children: new Map(),
+          files: [],
+          hidden: current.hidden || parts[i].startsWith('.'),
+        });
       }
       current = current.children.get(parts[i]);
     }
@@ -291,10 +319,13 @@ function renderNode(node, parentEl, depth) {
   const files = [...node.files].sort((a, b) => a.path.localeCompare(b.path));
 
   for (const [name, child] of dirs) {
+    if (!showHiddenFiles && child.hidden) continue;
+
     const wrapper = document.createElement('div');
 
     const item = document.createElement('div');
     item.className = 'tree-item tree-dir';
+    if (child.hidden) item.classList.add('dir-hidden');
     item.style.paddingLeft = `${8 + depth * 16}px`;
     item.innerHTML = `<span class="icon">&#9654;</span><span class="name">${esc(name)}</span>`;
 
@@ -318,9 +349,12 @@ function renderNode(node, parentEl, depth) {
   }
 
   for (const f of files) {
+    if (!showHiddenFiles && f.hidden) continue;
+
     const fileName = f.path.split('/').pop();
     const item = document.createElement('div');
     item.className = 'tree-item tree-file';
+    if (f.hidden) item.classList.add('file-hidden');
     item.dataset.filePath = f.path;
     item.style.paddingLeft = `${8 + depth * 16}px`;
 
@@ -348,6 +382,15 @@ async function openFile(f, itemEl, options = {}) {
   currentFilePath = f.path;
   contentEl.innerHTML = marked.parse(text);
   contentEl.scrollTop = scrollTop;
+
+  // 읽음 기록 저장
+  readHistory[f.path] = Date.now();
+  try { localStorage.setItem('md-viewer-read-history', JSON.stringify(readHistory)); } catch {}
+
+  // recent 뷰에서 즉시 읽음 상태 반영
+  if (viewMode === 'recent' && itemEl) {
+    itemEl.classList.add('file-read');
+  }
 }
 
 // === Search ===
@@ -443,15 +486,17 @@ function escRegex(str) {
 function setViewMode(mode) {
   viewMode = mode;
   if (mode === 'tree') {
-    viewModeBtn.textContent = '\u{1F552}';
-    viewModeBtn.title = '최근 업데이트 순';
+    viewModeBtn.innerHTML = ICONS.clock;
+    viewModeBtn.setAttribute('aria-label', '최근 업데이트 순');
+    viewModeBtn.setAttribute('data-tooltip', '최근 업데이트 순');
     foldAllBtn.classList.remove('hidden');
     unfoldAllBtn.classList.remove('hidden');
     const tree = buildTree(allFiles);
     renderTree(tree);
   } else {
-    viewModeBtn.textContent = '\u{1F4C2}';
-    viewModeBtn.title = '디렉토리 구조';
+    viewModeBtn.innerHTML = ICONS.folder;
+    viewModeBtn.setAttribute('aria-label', '디렉토리 구조');
+    viewModeBtn.setAttribute('data-tooltip', '디렉토리 구조');
     foldAllBtn.classList.add('hidden');
     unfoldAllBtn.classList.add('hidden');
     renderRecentList(allFiles);
@@ -465,12 +510,19 @@ viewModeBtn.addEventListener('click', () => {
 // === Render recent updates list ===
 function renderRecentList(files) {
   treeEl.innerHTML = '';
-  const sorted = [...files].sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+  const visible = showHiddenFiles ? files : files.filter(f => !f.hidden);
+  const sorted = [...visible].sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
 
   for (const f of sorted) {
     const item = document.createElement('div');
     item.className = 'tree-item tree-file recent-item';
+    if (f.hidden) item.classList.add('file-hidden');
     item.dataset.filePath = f.path;
+
+    // 읽음 상태: lastModified가 마지막 읽은 시간 이전이면 읽은 것으로 판단
+    const lastRead = readHistory[f.path] || 0;
+    const isRead = lastRead >= f.lastModified;
+    if (isRead) item.classList.add('file-read');
 
     const fileName = f.path.split('/').pop();
     const dirPath = f.path.split('/').slice(0, -1).join('/');
@@ -479,7 +531,7 @@ function renderRecentList(files) {
     item.innerHTML = `
       <span class="icon">&#9776;</span>
       <div class="recent-content">
-        <div class="recent-name">${esc(fileName)}${f._firstLine ? `<span class="first-line">${esc(f._firstLine)}</span>` : ''}</div>
+        <div class="recent-name"><span class="name-text">${esc(fileName)}</span>${f._firstLine ? `<span class="first-line">${esc(f._firstLine)}</span>` : ''}</div>
         <div class="recent-meta">
           <span class="recent-path">${esc(dirPath)}</span>
           ${timeStr ? `<span class="recent-time">${timeStr}</span>` : ''}
@@ -519,14 +571,17 @@ unfoldAllBtn.addEventListener('click', () => {
 
 // === Theme toggle ===
 const THEMES = ['dark', 'light', 'system'];
-const THEME_ICONS = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
+const THEME_SVG = { dark: 'moon', light: 'sun', system: 'monitor' };
+const THEME_LABELS = { dark: '다크 모드', light: '라이트 모드', system: '시스템 설정' };
 let themeIndex = parseInt(localStorage.getItem('md-viewer-theme-idx') || '0', 10);
 
 function applyTheme() {
   const theme = THEMES[themeIndex];
   localStorage.setItem('md-viewer-theme-idx', themeIndex);
-  document.getElementById('themeToggle').textContent = THEME_ICONS[theme];
-  document.getElementById('themeToggle').title = `테마: ${theme}`;
+  const themeToggleEl = document.getElementById('themeToggle');
+  themeToggleEl.innerHTML = ICONS[THEME_SVG[theme]];
+  themeToggleEl.setAttribute('data-tooltip', THEME_LABELS[theme]);
+  themeToggleEl.setAttribute('aria-label', THEME_LABELS[theme]);
 
   if (theme === 'system') {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -672,5 +727,42 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// === Init buttons (SVG icons + hidden toggle) ===
+function initButtons() {
+  foldAllBtn.innerHTML = ICONS.collapseAll;
+  unfoldAllBtn.innerHTML = ICONS.expandAll;
+  refreshBtn.innerHTML = ICONS.refresh;
+  if (changeFolderBtn) changeFolderBtn.innerHTML = ICONS.folderOpen;
+  const fallbackLabel = document.getElementById('folderChangeFallbackLabel');
+  if (fallbackLabel) fallbackLabel.insertAdjacentHTML('afterbegin', ICONS.folderOpen);
+
+  // viewModeBtn 초기 상태
+  viewModeBtn.innerHTML = viewMode === 'tree' ? ICONS.clock : ICONS.folder;
+
+  // hiddenToggleBtn 초기 상태
+  hiddenToggleBtn.innerHTML = showHiddenFiles ? ICONS.eye : ICONS.eyeOff;
+  hiddenToggleBtn.setAttribute('data-tooltip', showHiddenFiles ? '숨김 파일 숨기기' : '숨김 파일 표시');
+  hiddenToggleBtn.setAttribute('aria-label', showHiddenFiles ? '숨김 파일 숨기기' : '숨김 파일 표시');
+  if (showHiddenFiles) hiddenToggleBtn.classList.add('btn-active');
+}
+
+hiddenToggleBtn.addEventListener('click', () => {
+  showHiddenFiles = !showHiddenFiles;
+  localStorage.setItem('md-viewer-show-hidden', showHiddenFiles);
+
+  hiddenToggleBtn.innerHTML = showHiddenFiles ? ICONS.eye : ICONS.eyeOff;
+  hiddenToggleBtn.setAttribute('data-tooltip', showHiddenFiles ? '숨김 파일 숨기기' : '숨김 파일 표시');
+  hiddenToggleBtn.setAttribute('aria-label', showHiddenFiles ? '숨김 파일 숨기기' : '숨김 파일 표시');
+  hiddenToggleBtn.classList.toggle('btn-active', showHiddenFiles);
+
+  if (viewMode === 'tree') {
+    const tree = buildTree(allFiles);
+    renderTree(tree);
+  } else {
+    renderRecentList(allFiles);
+  }
+});
+
 // === Start ===
+initButtons();
 init();
