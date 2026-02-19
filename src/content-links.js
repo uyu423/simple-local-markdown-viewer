@@ -30,6 +30,56 @@ function normalizePath(path) {
   return stack.join('/');
 }
 
+function parseFragmentId(href) {
+  const hashIndex = href.indexOf('#');
+  if (hashIndex === -1) return '';
+  return href.slice(hashIndex + 1);
+}
+
+function decodeFragmentId(fragmentId) {
+  try {
+    return decodeURIComponent(fragmentId);
+  } catch {
+    return fragmentId;
+  }
+}
+
+function findElementByIdInContent(contentEl, id) {
+  if (!id) return null;
+
+  const direct = document.getElementById(id);
+  if (direct && contentEl.contains(direct)) return direct;
+
+  const allWithId = contentEl.querySelectorAll('[id]');
+  for (const element of allWithId) {
+    if (element.id === id) return element;
+  }
+  return null;
+}
+
+function scrollToFragment(contentEl, href) {
+  const rawFragmentId = parseFragmentId(href);
+  if (!rawFragmentId) {
+    contentEl.scrollTop = 0;
+    return true;
+  }
+
+  const decodedFragmentId = decodeFragmentId(rawFragmentId);
+  const candidates = decodedFragmentId === rawFragmentId
+    ? [rawFragmentId]
+    : [rawFragmentId, decodedFragmentId];
+
+  for (const candidate of candidates) {
+    const target = findElementByIdInContent(contentEl, candidate);
+    if (target) {
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function resolveLinkedFilePath(href, currentPath, files) {
   const rawPath = href.split('#')[0].split('?')[0].trim();
   if (!rawPath) return null;
@@ -84,7 +134,16 @@ export function setupContentLinkHandling({
     if (!anchor) return;
 
     const href = (anchor.getAttribute('href') || '').trim();
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+    if (!href || href.startsWith('javascript:')) return;
+
+    if (href.startsWith('#')) {
+      e.preventDefault();
+      const moved = scrollToFragment(contentEl, href);
+      if (!moved) {
+        console.warn('링크된 섹션을 찾을 수 없습니다:', href);
+      }
+      return;
+    }
 
     if (isLocalFileLink(href)) {
       e.preventDefault();
