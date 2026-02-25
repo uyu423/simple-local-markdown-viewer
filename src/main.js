@@ -91,23 +91,64 @@ try {
 }
 
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
+const FILE_QUERY_PARAM = 'file';
 
 const { configureRenderedLinks } = setupContentLinkHandling({
   contentEl,
   getAllFiles: () => allFiles,
   getCurrentFilePath: () => currentFilePath,
-  openLocalFileByPath: async (targetPath) => {
-    const targetFile = allFiles.find((f) => f.path === targetPath);
-    if (!targetFile) return false;
-
-    const item = findFileItemByPath(targetPath);
-    await openFile(targetFile, item);
-    return true;
-  },
+  openLocalFileByPath: async (targetPath) => openFileByPath(targetPath),
 });
+
+function getFilePathFromUrl() {
+  const filePath = new URLSearchParams(window.location.search).get(FILE_QUERY_PARAM);
+  return filePath ? filePath.trim() : '';
+}
+
+function syncUrlWithFilePath(path, options = {}) {
+  const { replace = false } = options;
+  const filePath = path || '';
+
+  const url = new URL(window.location.href);
+  if (filePath) {
+    url.searchParams.set(FILE_QUERY_PARAM, filePath);
+  } else {
+    url.searchParams.delete(FILE_QUERY_PARAM);
+  }
+
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const state = { ...(history.state || {}), filePath };
+
+  if (replace || nextUrl === currentUrl) {
+    history.replaceState(state, '', nextUrl);
+    return;
+  }
+
+  history.pushState(state, '', nextUrl);
+}
+
+function initializeHistoryState() {
+  const filePath = getFilePathFromUrl();
+  const currentStatePath = typeof history.state?.filePath === 'string' ? history.state.filePath : '';
+  if (currentStatePath === filePath) return;
+  history.replaceState({ ...(history.state || {}), filePath }, '', window.location.href);
+}
+
+async function openFileByPath(path, options = {}) {
+  const targetFile = allFiles.find((f) => f.path === path);
+  if (!targetFile) return false;
+
+  const activeListRoot = searchResults.classList.contains('hidden') ? treeEl : searchResults;
+  const item = findFileItemByPath(path, activeListRoot) || findFileItemByPath(path, treeEl);
+  await openFile(targetFile, item, options);
+  return true;
+}
 
 // === Init: check for saved directory ===
 async function init() {
+  initializeHistoryState();
+
   const saved = await getSavedDirectory();
 
   if (saved && !saved.needsPermission) {
@@ -229,6 +270,7 @@ async function showEditor(rootName, mdFiles, options = {}) {
   const previousContentScrollTop = preserveUiState ? contentEl.scrollTop : 0;
   const previousTreeState = preserveUiState ? captureTreeState() : null;
   const previousSearchScrollTop = preserveUiState ? searchResults.scrollTop : 0;
+  const requestedFilePathFromUrl = preserveUiState ? '' : getFilePathFromUrl();
 
   landing.style.display = 'none';
   editor.classList.remove('hidden');
@@ -264,17 +306,25 @@ async function showEditor(rootName, mdFiles, options = {}) {
     if (previousFilePath) {
       const fileToRestore = allFiles.find((f) => f.path === previousFilePath);
       if (fileToRestore) {
-        const itemToRestore = findFileItemByPath(previousFilePath, searchResults.classList.contains('hidden') ? treeEl : searchResults);
-        await openFile(fileToRestore, itemToRestore, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false });
+        await openFileByPath(previousFilePath, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false, updateHistory: false });
       } else {
         currentFilePath = '';
         currentFileRawText = '';
         contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
         breadcrumbEl.textContent = '';
         updateCopyRawButtonState();
+        syncUrlWithFilePath('', { replace: true });
       }
     }
   } else {
+    if (requestedFilePathFromUrl) {
+      const opened = await openFileByPath(requestedFilePathFromUrl, { scrollIntoView: false, trackRead: false, historyMode: 'replace' });
+      if (opened) {
+        hideLoading();
+        return;
+      }
+    }
+
     currentFilePath = '';
     currentFileRawText = '';
     contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
@@ -283,6 +333,7 @@ async function showEditor(rootName, mdFiles, options = {}) {
     searchResults.classList.add('hidden');
     treeEl.style.display = '';
     updateCopyRawButtonState();
+    syncUrlWithFilePath('', { replace: true });
   }
 
   hideLoading();
@@ -403,7 +454,7 @@ function renderNode(node, parentEl, depth, parentPath) {
 
 // === Open file ===
 async function openFile(f, itemEl, options = {}) {
-  const { scrollTop = 0, scrollIntoView = true, trackRead = true } = options;
+  const { scrollTop = 0, scrollIntoView = true, trackRead = true, updateHistory = true, historyMode = 'push' } = options;
 
   document.querySelectorAll('.tree-item.active').forEach((el) => el.classList.remove('active'));
   if (itemEl) {
@@ -422,6 +473,10 @@ async function openFile(f, itemEl, options = {}) {
   configureRenderedLinks();
   contentEl.scrollTop = scrollTop;
   updateCopyRawButtonState();
+
+  if (updateHistory) {
+    syncUrlWithFilePath(f.path, { replace: historyMode === 'replace' });
+  }
 
   if (trackRead) {
     // 읽음 기록 저장
@@ -843,6 +898,18 @@ function esc(str) {
   el.textContent = str;
   return el.innerHTML;
 }
+
+window.addEventListener('popstate', async () => {
+  if (!allFiles.length) return;
+
+  const targetPath = getFilePathFromUrl();
+  if (!targetPath || targetPath === currentFilePath) return;
+
+  const opened = await openFileByPath(targetPath, { scrollIntoView: false, trackRead: false, updateHistory: false });
+  if (!opened) {
+    console.warn('히스토리에서 요청한 파일을 찾을 수 없습니다:', targetPath);
+  }
+});
 
 // === Keyboard Shortcuts ===
 document.addEventListener('keydown', (e) => {
