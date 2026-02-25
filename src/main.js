@@ -23,6 +23,7 @@ const ICONS = {
   refresh: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4.5A5.5 5.5 0 1 0 13.5 8"/><path d="M13.5 1.5v3.5H10"/></svg>`,
   autoRefreshOn: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10.2-4.2"/><path d="M12.2 1.8v3.6H8.6"/><path d="M14 8a6 6 0 0 1-10.2 4.2"/><path d="M3.8 14.2v-3.6h3.6"/></svg>`,
   autoRefreshOff: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10.2-4.2"/><path d="M12.2 1.8v3.6H8.6"/><path d="M14 8a6 6 0 0 1-10.2 4.2"/><path d="M3.8 14.2v-3.6h3.6"/><line x1="2" y1="2" x2="14" y2="14"/></svg>`,
+  copy: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4.5" width="8.5" height="10" rx="1.5"/><path d="M3.5 11.5H3A1.5 1.5 0 0 1 1.5 10V2.5A1.5 1.5 0 0 1 3 1h6.5A1.5 1.5 0 0 1 11 2.5V3"/></svg>`,
   folderOpen: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.5l1.5 1.5h7v2"/><path d="M1.5 8l1.5 5.5h10l1.5-5.5z"/></svg>`,
   moon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 10A6 6 0 0 1 6 2.5a5.5 5.5 0 1 0 7.5 7.5z"/></svg>`,
   sun: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.6 3.6l1 1M11.4 11.4l1 1M3.6 12.4l1-1M11.4 4.6l1-1"/></svg>`,
@@ -48,6 +49,7 @@ const rootNameEl = document.getElementById('rootName');
 const treeEl = document.getElementById('tree');
 const breadcrumbEl = document.getElementById('breadcrumb');
 const contentEl = document.getElementById('content');
+const copyRawBtn = document.getElementById('copyRawBtn');
 
 const pickBtn = document.getElementById('pickBtn');
 const reconnectBtn = document.getElementById('reconnectBtn');
@@ -75,10 +77,12 @@ let allFiles = [];
 let viewMode = 'tree'; // 'tree' | 'recent'
 let currentHandle = null;
 let currentFilePath = '';
+let currentFileRawText = '';
 let autoRefreshTimer = null;
 let isAutoRefreshing = false;
 let showHiddenFiles = localStorage.getItem('md-viewer-show-hidden') === 'true';
 let autoRefreshEnabled = localStorage.getItem('md-viewer-auto-refresh') !== 'false';
+let copyFeedbackTimer = null;
 let readHistory;
 try {
   readHistory = JSON.parse(localStorage.getItem('md-viewer-read-history') || '{}');
@@ -264,17 +268,21 @@ async function showEditor(rootName, mdFiles, options = {}) {
         await openFile(fileToRestore, itemToRestore, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false });
       } else {
         currentFilePath = '';
+        currentFileRawText = '';
         contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
         breadcrumbEl.textContent = '';
+        updateCopyRawButtonState();
       }
     }
   } else {
     currentFilePath = '';
+    currentFileRawText = '';
     contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
     breadcrumbEl.textContent = '';
     searchInput.value = '';
     searchResults.classList.add('hidden');
     treeEl.style.display = '';
+    updateCopyRawButtonState();
   }
 
   hideLoading();
@@ -409,9 +417,11 @@ async function openFile(f, itemEl, options = {}) {
 
   const text = f._cachedText || (await f.read());
   currentFilePath = f.path;
+  currentFileRawText = text;
   contentEl.innerHTML = marked.parse(text);
   configureRenderedLinks();
   contentEl.scrollTop = scrollTop;
+  updateCopyRawButtonState();
 
   if (trackRead) {
     // 읽음 기록 저장
@@ -771,6 +781,63 @@ function setAutoRefreshEnabled(next) {
   }
 }
 
+function updateCopyRawButtonState() {
+  if (!copyRawBtn) return;
+
+  const hasFile = currentFilePath !== '';
+  copyRawBtn.disabled = !hasFile;
+  if (copyFeedbackTimer) return;
+
+  const label = hasFile ? '원본 마크다운 복사' : '복사할 파일 없음';
+  copyRawBtn.setAttribute('aria-label', label);
+  copyRawBtn.setAttribute('data-tooltip', label);
+}
+
+function showCopyFeedback(success) {
+  if (!copyRawBtn) return;
+
+  if (copyFeedbackTimer) {
+    window.clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+
+  const label = success ? '복사됨' : '복사 실패';
+  copyRawBtn.setAttribute('aria-label', label);
+  copyRawBtn.setAttribute('data-tooltip', label);
+  copyRawBtn.classList.toggle('btn-active', success);
+
+  copyFeedbackTimer = window.setTimeout(() => {
+    copyFeedbackTimer = null;
+    copyRawBtn.classList.remove('btn-active');
+    updateCopyRawButtonState();
+  }, 1200);
+}
+
+async function copyCurrentRawMarkdown() {
+  if (!currentFilePath) return;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(currentFileRawText);
+      showCopyFeedback(true);
+      return;
+    }
+
+    const textArea = document.createElement('textarea');
+    textArea.value = currentFileRawText;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-9999px';
+    textArea.setAttribute('readonly', '');
+    document.body.appendChild(textArea);
+    textArea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textArea);
+    showCopyFeedback(copied);
+  } catch {
+    showCopyFeedback(false);
+  }
+}
+
 function esc(str) {
   const el = document.createElement('span');
   el.textContent = str;
@@ -844,6 +911,8 @@ function initButtons() {
   }
 
   applyAutoRefreshToggleState();
+  if (copyRawBtn) copyRawBtn.innerHTML = ICONS.copy;
+  updateCopyRawButtonState();
 
   // viewModeBtn 초기 상태
   viewModeBtn.innerHTML = viewMode === 'tree' ? ICONS.clock : ICONS.folder;
@@ -874,6 +943,10 @@ hiddenToggleBtn.addEventListener('click', () => {
 
 autoRefreshToggleBtn?.addEventListener('click', () => {
   setAutoRefreshEnabled(!autoRefreshEnabled);
+});
+
+copyRawBtn?.addEventListener('click', () => {
+  copyCurrentRawMarkdown();
 });
 
 // === Start ===
