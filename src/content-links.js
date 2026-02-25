@@ -15,7 +15,7 @@ function resolveExternalHref(anchor, href) {
 }
 
 function normalizePath(path) {
-  const segments = path.split('/');
+  const segments = path.replace(/\\/g, '/').split('/');
   const stack = [];
 
   for (const segment of segments) {
@@ -28,6 +28,24 @@ function normalizePath(path) {
   }
 
   return stack.join('/');
+}
+
+function findFileByAbsolutePath(rawAbsolutePath, files) {
+  const absolutePath = normalizePath(rawAbsolutePath);
+  if (!absolutePath) return null;
+
+  let bestMatch = null;
+  for (const file of files) {
+    const filePath = normalizePath(file.path || '');
+    if (!filePath) continue;
+    if (absolutePath === filePath || absolutePath.endsWith(`/${filePath}`)) {
+      if (!bestMatch || filePath.length > bestMatch.path.length) {
+        bestMatch = { path: filePath, originalPath: file.path };
+      }
+    }
+  }
+
+  return bestMatch ? bestMatch.originalPath : null;
 }
 
 function parseFragmentId(href) {
@@ -99,12 +117,17 @@ function resolveLinkedFilePath(href, currentPath, files) {
     const exact = files.find((f) => f.path === candidate);
     if (exact) return exact.path;
 
+    const fromAbsolute = findFileByAbsolutePath(fileUrl.pathname, files);
+    if (fromAbsolute) return fromAbsolute;
+
     const suffix = `/${candidate}`;
     const bySuffix = files.find((f) => f.path.endsWith(suffix) || f.path === candidate);
     return bySuffix ? bySuffix.path : null;
   }
 
   if (decodedPath.startsWith('/')) {
+    const fromAbsolute = findFileByAbsolutePath(decodedPath, files);
+    if (fromAbsolute) return fromAbsolute;
     return normalizePath(decodedPath.slice(1));
   }
 
