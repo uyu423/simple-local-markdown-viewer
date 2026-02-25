@@ -21,6 +21,8 @@ const ICONS = {
   eye: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/><circle cx="8" cy="8" r="2"/></svg>`,
   eyeOff: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="14" y2="14"/><path d="M4 4.4C2.7 5.4 1.5 7 1 8c1 2 3.5 4.5 7 4.5 1.5 0 2.8-.4 3.9-1M7.5 3.5c.2 0 .3 0 .5 0 3.5 0 6 3.5 7 5-.4.7-1 1.5-1.7 2.1"/><path d="M6.5 6.6A2 2 0 0 0 9.4 9.4"/></svg>`,
   refresh: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4.5A5.5 5.5 0 1 0 13.5 8"/><path d="M13.5 1.5v3.5H10"/></svg>`,
+  autoRefreshOn: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10.2-4.2"/><path d="M12.2 1.8v3.6H8.6"/><path d="M14 8a6 6 0 0 1-10.2 4.2"/><path d="M3.8 14.2v-3.6h3.6"/></svg>`,
+  autoRefreshOff: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a6 6 0 0 1 10.2-4.2"/><path d="M12.2 1.8v3.6H8.6"/><path d="M14 8a6 6 0 0 1-10.2 4.2"/><path d="M3.8 14.2v-3.6h3.6"/><line x1="2" y1="2" x2="14" y2="14"/></svg>`,
   folderOpen: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.5l1.5 1.5h7v2"/><path d="M1.5 8l1.5 5.5h10l1.5-5.5z"/></svg>`,
   moon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 10A6 6 0 0 1 6 2.5a5.5 5.5 0 1 0 7.5 7.5z"/></svg>`,
   sun: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.6 3.6l1 1M11.4 11.4l1 1M3.6 12.4l1-1M11.4 4.6l1-1"/></svg>`,
@@ -64,6 +66,8 @@ const unfoldAllBtn = document.getElementById('unfoldAllBtn');
 const hiddenToggleBtn = document.getElementById('hiddenToggleBtn');
 const refreshBtn = document.getElementById('refreshBtn');
 const changeFolderBtn = document.getElementById('changeFolderBtn');
+const autoRefreshToggleBtn = document.getElementById('autoRefreshToggleBtn');
+const folderChangeFallbackLabel = document.getElementById('folderChangeFallbackLabel');
 
 // State
 let pendingHandle = null;
@@ -74,6 +78,7 @@ let currentFilePath = '';
 let autoRefreshTimer = null;
 let isAutoRefreshing = false;
 let showHiddenFiles = localStorage.getItem('md-viewer-show-hidden') === 'true';
+let autoRefreshEnabled = localStorage.getItem('md-viewer-auto-refresh') !== 'false';
 let readHistory;
 try {
   readHistory = JSON.parse(localStorage.getItem('md-viewer-read-history') || '{}');
@@ -218,6 +223,8 @@ async function showEditor(rootName, mdFiles, options = {}) {
   const previousFilePath = preserveUiState ? currentFilePath : '';
   const previousSearchQuery = preserveUiState ? searchInput.value.trim() : '';
   const previousContentScrollTop = preserveUiState ? contentEl.scrollTop : 0;
+  const previousTreeState = preserveUiState ? captureTreeState() : null;
+  const previousSearchScrollTop = preserveUiState ? searchResults.scrollTop : 0;
 
   landing.style.display = 'none';
   editor.classList.remove('hidden');
@@ -241,17 +248,20 @@ async function showEditor(rootName, mdFiles, options = {}) {
     if (previousSearchQuery) {
       searchInput.value = previousSearchQuery;
       runSearch(previousSearchQuery);
+      searchResults.scrollTop = previousSearchScrollTop;
     } else {
       searchInput.value = '';
       searchResults.classList.add('hidden');
       treeEl.style.display = '';
     }
 
+    restoreTreeState(previousTreeState);
+
     if (previousFilePath) {
       const fileToRestore = allFiles.find((f) => f.path === previousFilePath);
       if (fileToRestore) {
-        const itemToRestore = findFileItemByPath(previousFilePath);
-        await openFile(fileToRestore, itemToRestore, { scrollTop: previousContentScrollTop });
+        const itemToRestore = findFileItemByPath(previousFilePath, searchResults.classList.contains('hidden') ? treeEl : searchResults);
+        await openFile(fileToRestore, itemToRestore, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false });
       } else {
         currentFilePath = '';
         contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
@@ -326,10 +336,10 @@ function buildTree(files) {
 // === Render tree ===
 function renderTree(root) {
   treeEl.innerHTML = '';
-  renderNode(root, treeEl, 0);
+  renderNode(root, treeEl, 0, '');
 }
 
-function renderNode(node, parentEl, depth) {
+function renderNode(node, parentEl, depth, parentPath) {
   const dirs = [...node.children.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   const files = [...node.files].sort((a, b) => a.path.localeCompare(b.path));
 
@@ -340,6 +350,8 @@ function renderNode(node, parentEl, depth) {
 
     const item = document.createElement('div');
     item.className = 'tree-item tree-dir';
+    const dirPath = parentPath ? `${parentPath}/${name}` : name;
+    item.dataset.dirPath = dirPath;
     if (child.hidden) item.classList.add('dir-hidden');
     item.style.paddingLeft = `${8 + depth * 16}px`;
     item.innerHTML = `<span class="icon">&#9654;</span><span class="name">${esc(name)}</span>`;
@@ -358,7 +370,7 @@ function renderNode(node, parentEl, depth) {
     });
 
     wrapper.appendChild(item);
-    renderNode(child, childContainer, depth + 1);
+    renderNode(child, childContainer, depth + 1, dirPath);
     wrapper.appendChild(childContainer);
     parentEl.appendChild(wrapper);
   }
@@ -383,12 +395,14 @@ function renderNode(node, parentEl, depth) {
 
 // === Open file ===
 async function openFile(f, itemEl, options = {}) {
-  const { scrollTop = 0 } = options;
+  const { scrollTop = 0, scrollIntoView = true, trackRead = true } = options;
 
   document.querySelectorAll('.tree-item.active').forEach((el) => el.classList.remove('active'));
   if (itemEl) {
     itemEl.classList.add('active');
-    itemEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (scrollIntoView) {
+      itemEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
   }
 
   breadcrumbEl.textContent = f.path.split('/').join(' \u203A ');
@@ -399,13 +413,15 @@ async function openFile(f, itemEl, options = {}) {
   configureRenderedLinks();
   contentEl.scrollTop = scrollTop;
 
-  // 읽음 기록 저장
-  readHistory[f.path] = Date.now();
-  try { localStorage.setItem('md-viewer-read-history', JSON.stringify(readHistory)); } catch {}
+  if (trackRead) {
+    // 읽음 기록 저장
+    readHistory[f.path] = Date.now();
+    try { localStorage.setItem('md-viewer-read-history', JSON.stringify(readHistory)); } catch {}
 
-  // recent 뷰에서 즉시 읽음 상태 반영
-  if (viewMode === 'recent' && itemEl) {
-    itemEl.classList.add('file-read');
+    // recent 뷰에서 즉시 읽음 상태 반영
+    if (viewMode === 'recent' && itemEl) {
+      itemEl.classList.add('file-read');
+    }
   }
 }
 
@@ -646,8 +662,8 @@ document.addEventListener('mouseup', () => {
 });
 
 // === Utils ===
-function findFileItemByPath(path) {
-  const items = treeEl.querySelectorAll('.tree-item.tree-file');
+function findFileItemByPath(path, rootEl = treeEl) {
+  const items = rootEl.querySelectorAll('.tree-item.tree-file');
   for (const item of items) {
     if (item.dataset.filePath === path) {
       return item;
@@ -658,7 +674,7 @@ function findFileItemByPath(path) {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  if (!supportsDirectoryPicker || !currentHandle) return;
+  if (!supportsDirectoryPicker || !currentHandle || !autoRefreshEnabled) return;
 
   autoRefreshTimer = window.setInterval(() => {
     refreshInBackground();
@@ -676,14 +692,82 @@ async function refreshInBackground() {
 
   isAutoRefreshing = true;
   try {
-    await loadFromHandle(currentHandle, {
-      preserveUiState: true,
-      silent: true,
-    });
+    const mdFiles = await scanDirectoryHandle(currentHandle);
+    if (!hasFileListChanged(allFiles, mdFiles)) {
+      return;
+    }
+
+    await showEditor(currentHandle.name, mdFiles, { preserveUiState: true });
   } catch (e) {
     if (e.name !== 'AbortError') console.error(e);
   } finally {
     isAutoRefreshing = false;
+  }
+}
+
+function hasFileListChanged(prevFiles, nextFiles) {
+  if (prevFiles.length !== nextFiles.length) return true;
+
+  const prevMap = new Map(prevFiles.map((file) => [file.path, file]));
+  for (const file of nextFiles) {
+    const prev = prevMap.get(file.path);
+    if (!prev) return true;
+    if ((prev.lastModified || 0) !== (file.lastModified || 0)) return true;
+    if ((prev.hidden || false) !== (file.hidden || false)) return true;
+  }
+
+  return false;
+}
+
+function captureTreeState() {
+  const expandedDirPaths = [];
+  treeEl.querySelectorAll('.tree-item.tree-dir').forEach((dirItem) => {
+    const container = dirItem.nextElementSibling;
+    if (!container?.classList.contains('tree-children')) return;
+    if (!container.classList.contains('open')) return;
+    if (!dirItem.dataset.dirPath) return;
+    expandedDirPaths.push(dirItem.dataset.dirPath);
+  });
+
+  return {
+    expandedDirPaths,
+    treeScrollTop: treeEl.scrollTop,
+  };
+}
+
+function restoreTreeState(state) {
+  if (!state || viewMode !== 'tree') return;
+
+  treeEl.querySelectorAll('.tree-item.tree-dir').forEach((dirItem) => {
+    const container = dirItem.nextElementSibling;
+    if (!container?.classList.contains('tree-children')) return;
+
+    const isOpen = state.expandedDirPaths.includes(dirItem.dataset.dirPath || '');
+    container.classList.toggle('open', isOpen);
+    const icon = dirItem.querySelector('.icon');
+    if (icon) icon.innerHTML = isOpen ? '&#9660;' : '&#9654;';
+  });
+
+  treeEl.scrollTop = state.treeScrollTop || 0;
+}
+
+function applyAutoRefreshToggleState() {
+  if (!autoRefreshToggleBtn) return;
+
+  autoRefreshToggleBtn.innerHTML = autoRefreshEnabled ? ICONS.autoRefreshOn : ICONS.autoRefreshOff;
+  autoRefreshToggleBtn.classList.toggle('btn-active', autoRefreshEnabled);
+  autoRefreshToggleBtn.setAttribute('aria-label', autoRefreshEnabled ? '자동 갱신 끄기' : '자동 갱신 켜기');
+  autoRefreshToggleBtn.setAttribute('data-tooltip', autoRefreshEnabled ? '자동 갱신 끄기' : '자동 갱신 켜기');
+}
+
+function setAutoRefreshEnabled(next) {
+  autoRefreshEnabled = next;
+  localStorage.setItem('md-viewer-auto-refresh', String(autoRefreshEnabled));
+  applyAutoRefreshToggleState();
+  if (autoRefreshEnabled) {
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
   }
 }
 
@@ -749,8 +833,17 @@ function initButtons() {
   unfoldAllBtn.innerHTML = ICONS.expandAll;
   refreshBtn.innerHTML = ICONS.refresh;
   if (changeFolderBtn) changeFolderBtn.innerHTML = ICONS.folderOpen;
-  const fallbackLabel = document.getElementById('folderChangeFallbackLabel');
-  if (fallbackLabel) fallbackLabel.insertAdjacentHTML('afterbegin', ICONS.folderOpen);
+  if (folderChangeFallbackLabel) folderChangeFallbackLabel.insertAdjacentHTML('afterbegin', ICONS.folder);
+
+  if (supportsDirectoryPicker) {
+    changeFolderBtn?.classList.remove('hidden');
+    folderChangeFallbackLabel?.classList.add('hidden');
+  } else {
+    changeFolderBtn?.classList.add('hidden');
+    folderChangeFallbackLabel?.classList.remove('hidden');
+  }
+
+  applyAutoRefreshToggleState();
 
   // viewModeBtn 초기 상태
   viewModeBtn.innerHTML = viewMode === 'tree' ? ICONS.clock : ICONS.folder;
@@ -777,6 +870,10 @@ hiddenToggleBtn.addEventListener('click', () => {
   } else {
     renderRecentList(allFiles);
   }
+});
+
+autoRefreshToggleBtn?.addEventListener('click', () => {
+  setAutoRefreshEnabled(!autoRefreshEnabled);
 });
 
 // === Start ===
