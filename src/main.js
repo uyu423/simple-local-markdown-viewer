@@ -1,8 +1,9 @@
-import { marked } from 'marked';
+import { Marked } from 'marked';
+import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import mermaid from 'mermaid';
-import 'highlight.js/styles/github-dark.min.css';
-import 'highlight.js/styles/github.min.css';
+import highlightDarkCss from 'highlight.js/styles/github-dark.min.css?inline';
+import highlightLightCss from 'highlight.js/styles/github.min.css?inline';
 import {
   supportsDirectoryPicker,
   getSavedDirectory,
@@ -32,16 +33,30 @@ const ICONS = {
 };
 
 // Configure marked with highlight.js
-marked.setOptions({
-  highlight(code, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      return hljs.highlight(code, { language: lang }).value;
-    }
-    return hljs.highlightAuto(code).value;
-  },
+const marked = new Marked({
   breaks: true,
   gfm: true,
 });
+
+marked.use(markedHighlight({
+  langPrefix: 'hljs language-',
+  emptyLangClass: 'hljs',
+  highlight(code, lang) {
+    if (lang === 'mermaid') {
+      return esc(code);
+    }
+
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(code, { language: lang }).value;
+      }
+
+      return esc(code);
+    } catch {
+      return esc(code);
+    }
+  },
+}));
 
 // DOM refs
 const landing = document.getElementById('landing');
@@ -71,6 +86,9 @@ const refreshBtn = document.getElementById('refreshBtn');
 const changeFolderBtn = document.getElementById('changeFolderBtn');
 const autoRefreshToggleBtn = document.getElementById('autoRefreshToggleBtn');
 const folderChangeFallbackLabel = document.getElementById('folderChangeFallbackLabel');
+const highlightThemeStyleEl = document.createElement('style');
+highlightThemeStyleEl.id = 'hljs-theme';
+document.head.appendChild(highlightThemeStyleEl);
 
 // State
 let pendingHandle = null;
@@ -631,6 +649,7 @@ async function renderMarkdownContent(text) {
   const renderToken = ++contentRenderToken;
   contentEl.innerHTML = marked.parse(text);
   prepareMermaidBlocks();
+  enhanceCodeBlocks();
   await renderMermaidDiagrams(renderToken);
   if (renderToken !== contentRenderToken) return;
   configureRenderedLinks();
@@ -647,6 +666,34 @@ function prepareMermaidBlocks() {
     mermaidBlock.className = 'mermaid';
     mermaidBlock.textContent = codeEl.textContent || '';
     preEl.replaceWith(mermaidBlock);
+  }
+}
+
+function enhanceCodeBlocks() {
+  const codeBlocks = contentEl.querySelectorAll('pre > code');
+
+  for (const codeEl of codeBlocks) {
+    const preEl = codeEl.closest('pre');
+    if (!preEl || preEl.parentElement?.classList.contains('code-block-frame')) continue;
+
+    const frameEl = document.createElement('div');
+    frameEl.className = 'code-block-frame';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'action-btn code-copy-btn';
+    copyBtn.innerHTML = ICONS.copy;
+    copyBtn.setAttribute('aria-label', '코드 복사');
+    copyBtn.setAttribute('data-tooltip', '코드 복사');
+
+    copyBtn.addEventListener('click', async () => {
+      const copied = await copyTextToClipboard(codeEl.textContent || '');
+      showCodeBlockCopyFeedback(copyBtn, copied);
+    });
+
+    preEl.replaceWith(frameEl);
+    frameEl.appendChild(copyBtn);
+    frameEl.appendChild(preEl);
   }
 }
 
@@ -672,7 +719,17 @@ async function renderMermaidDiagrams(renderToken) {
 }
 
 function getMermaidTheme() {
-  return document.documentElement.getAttribute('data-theme') === 'light' ? 'default' : 'dark';
+  return getResolvedTheme() === 'light' ? 'default' : 'dark';
+}
+
+function getResolvedTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+
+function applyHighlightTheme() {
+  highlightThemeStyleEl.textContent = getResolvedTheme() === 'light'
+    ? highlightLightCss
+    : highlightDarkCss;
 }
 
 async function rerenderCurrentContent() {
@@ -936,6 +993,8 @@ function applyTheme() {
   } else {
     document.documentElement.setAttribute('data-theme', theme);
   }
+
+  applyHighlightTheme();
 }
 
 document.getElementById('themeToggle').addEventListener('click', () => {
@@ -1130,18 +1189,34 @@ function showCopyFeedback(success) {
   }, 1200);
 }
 
-async function copyCurrentRawMarkdown() {
-  if (!currentFilePath) return;
+function showCodeBlockCopyFeedback(button, success) {
+  if (button._copyFeedbackTimer) {
+    window.clearTimeout(button._copyFeedbackTimer);
+    button._copyFeedbackTimer = null;
+  }
 
+  const label = success ? '복사됨' : '복사 실패';
+  button.setAttribute('aria-label', label);
+  button.setAttribute('data-tooltip', label);
+  button.classList.toggle('btn-active', success);
+
+  button._copyFeedbackTimer = window.setTimeout(() => {
+    button._copyFeedbackTimer = null;
+    button.classList.remove('btn-active');
+    button.setAttribute('aria-label', '코드 복사');
+    button.setAttribute('data-tooltip', '코드 복사');
+  }, 1200);
+}
+
+async function copyTextToClipboard(text) {
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(currentFileRawText);
-      showCopyFeedback(true);
-      return;
+      await navigator.clipboard.writeText(text);
+      return true;
     }
 
     const textArea = document.createElement('textarea');
-    textArea.value = currentFileRawText;
+    textArea.value = text;
     textArea.style.position = 'fixed';
     textArea.style.left = '-9999px';
     textArea.setAttribute('readonly', '');
@@ -1149,10 +1224,17 @@ async function copyCurrentRawMarkdown() {
     textArea.select();
     const copied = document.execCommand('copy');
     document.body.removeChild(textArea);
-    showCopyFeedback(copied);
+    return copied;
   } catch {
-    showCopyFeedback(false);
+    return false;
   }
+}
+
+async function copyCurrentRawMarkdown() {
+  if (!currentFilePath) return;
+
+  const copied = await copyTextToClipboard(currentFileRawText);
+  showCopyFeedback(copied);
 }
 
 function esc(str) {
