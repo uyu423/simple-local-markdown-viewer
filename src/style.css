@@ -613,6 +613,22 @@ mark {
   line-height: 1.65;
 }
 
+#content .mermaid {
+  margin: 1.2em 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--pre-bg);
+  overflow-x: auto;
+}
+
+#content .mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
 #content blockquote {
   border-left: 3px solid var(--accent);
   padding: 10px 16px;

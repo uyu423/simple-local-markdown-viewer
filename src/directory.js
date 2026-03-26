@@ -62,21 +62,24 @@ export async function scanDirectoryHandle(dirHandle, prefix = '') {
   for await (const entry of dirHandle.values()) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     const isHiddenEntry = entry.name.startsWith('.');
-    if (entry.kind === 'file' && isAllowedFile(entry.name)) {
-      const file = await entry.getFile();
-      results.push({
-        path,
-        lastModified: file.lastModified,
-        hidden: isHiddenEntry,
-        read: () => file.text(),
-      });
-    } else if (entry.kind === 'directory' && entry.name !== 'node_modules') {
-      const children = await scanDirectoryHandle(entry, path);
-      if (isHiddenEntry) {
-        children.forEach(c => { c.hidden = true; });
+      if (entry.kind === 'file' && isAllowedFile(entry.name)) {
+        const file = await entry.getFile();
+        results.push({
+          path,
+          lastModified: file.lastModified,
+          hidden: isHiddenEntry,
+          read: () => file.text(),
+          readHead: (maxBytes = 4096) => file.slice(0, maxBytes).text(),
+        });
+      } else if (entry.kind === 'directory' && entry.name !== 'node_modules') {
+        const children = await scanDirectoryHandle(entry, path);
+        if (isHiddenEntry) {
+          children.forEach((c) => {
+            c.hidden = true;
+          });
+        }
+        results.push(...children);
       }
-      results.push(...children);
-    }
   }
   return results;
 }
@@ -92,12 +95,13 @@ export function scanInputFiles(fileList) {
     })
     .map((f) => {
       const pathParts = f.webkitRelativePath.split('/').slice(1);
-      const isHidden = pathParts.some(p => p.startsWith('.'));
+      const isHidden = pathParts.some((p) => p.startsWith('.'));
       return {
         path: pathParts.join('/'),
         lastModified: f.lastModified,
         hidden: isHidden,
         read: () => f.text(),
+        readHead: (maxBytes = 4096) => f.slice(0, maxBytes).text(),
       };
     });
 }

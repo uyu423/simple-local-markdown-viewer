@@ -1,5 +1,6 @@
 import { marked } from 'marked';
 import hljs from 'highlight.js';
+import mermaid from 'mermaid';
 import 'highlight.js/styles/github-dark.min.css';
 import 'highlight.js/styles/github.min.css';
 import {
@@ -83,6 +84,11 @@ let isAutoRefreshing = false;
 let showHiddenFiles = localStorage.getItem('md-viewer-show-hidden') === 'true';
 let autoRefreshEnabled = localStorage.getItem('md-viewer-auto-refresh') !== 'false';
 let copyFeedbackTimer = null;
+let searchRequestId = 0;
+let firstLinePreloadToken = 0;
+let contentRenderToken = 0;
+let cachedTextSize = 0;
+const cachedTextLru = new Map();
 let readHistory;
 try {
   readHistory = JSON.parse(localStorage.getItem('md-viewer-read-history') || '{}');
@@ -92,6 +98,10 @@ try {
 
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
 const FILE_QUERY_PARAM = 'file';
+const FIRST_LINE_PREVIEW_BYTES = 4096;
+const FIRST_LINE_PRELOAD_BATCH = 24;
+const SEARCH_CONTENT_BATCH = 20;
+const MAX_CACHED_TEXT_CHARS = 5 * 1024 * 1024;
 
 const { configureRenderedLinks } = setupContentLinkHandling({
   contentEl,
@@ -277,7 +287,9 @@ async function showEditor(rootName, mdFiles, options = {}) {
   rootNameEl.textContent = rootName;
 
   allFiles = mdFiles;
-  await preloadFirstLines(allFiles);
+  resetFileTextCache();
+  searchRequestId += 1;
+  scheduleFirstLinePreload(allFiles);
 
   if (viewMode === 'recent') {
     renderRecentList(allFiles);
@@ -293,8 +305,9 @@ async function showEditor(rootName, mdFiles, options = {}) {
   if (preserveUiState) {
     if (previousSearchQuery) {
       searchInput.value = previousSearchQuery;
-      runSearch(previousSearchQuery);
-      searchResults.scrollTop = previousSearchScrollTop;
+      void runSearch(previousSearchQuery).then(() => {
+        searchResults.scrollTop = previousSearchScrollTop;
+      });
     } else {
       searchInput.value = '';
       searchResults.classList.add('hidden');
@@ -340,19 +353,36 @@ async function showEditor(rootName, mdFiles, options = {}) {
 }
 
 // === Preload first meaningful line from each file ===
-async function preloadFirstLines(files) {
-  await Promise.all(
-    files.map(async (f) => {
-      try {
-        const text = await f.read();
-        f._cachedText = text;
-        f._firstLine = extractFirstLine(text);
-      } catch {
-        f._firstLine = '';
-        f._cachedText = '';
-      }
-    }),
-  );
+function scheduleFirstLinePreload(files) {
+  const token = ++firstLinePreloadToken;
+  void preloadFirstLines(files, token);
+}
+
+async function preloadFirstLines(files, token) {
+  for (let i = 0; i < files.length; i += FIRST_LINE_PRELOAD_BATCH) {
+    if (token !== firstLinePreloadToken) return;
+
+    const batch = files.slice(i, i + FIRST_LINE_PRELOAD_BATCH);
+    await Promise.all(
+      batch.map(async (f) => {
+        if (f._firstLineLoaded) return;
+
+        try {
+          const previewText = await readFilePreview(f);
+          f._firstLine = extractFirstLine(previewText);
+        } catch {
+          f._firstLine = '';
+        }
+
+        f._firstLineLoaded = true;
+      }),
+    );
+
+    if (token !== firstLinePreloadToken) return;
+
+    updateVisibleFirstLines(batch);
+    await yieldToBrowser();
+  }
 }
 
 function extractFirstLine(text) {
@@ -364,7 +394,114 @@ function extractFirstLine(text) {
       return heading.length > 50 ? heading.slice(0, 50) + '…' : heading;
     }
   }
+
+  for (const line of lines) {
+    const preview = line.trim().replace(/^>\s*/, '').replace(/^[-*+]\s+/, '').trim();
+    if (!preview || preview.startsWith('```')) continue;
+    return preview.length > 50 ? preview.slice(0, 50) + '…' : preview;
+  }
+
   return '';
+}
+
+async function readFileText(file) {
+  if (typeof file._cachedText === 'string') {
+    touchCachedText(file.path, file._cachedText.length);
+    return file._cachedText;
+  }
+
+  const text = await file.read();
+  setCachedText(file, text);
+  return text;
+}
+
+async function readFilePreview(file) {
+  if (file.readHead) {
+    return file.readHead(FIRST_LINE_PREVIEW_BYTES);
+  }
+
+  return readFileText(file);
+}
+
+function updateVisibleFirstLines(files) {
+  const items = treeEl.querySelectorAll('.tree-item.tree-file');
+
+  for (const item of items) {
+    const file = files.find((candidate) => candidate.path === item.dataset.filePath);
+    if (!file || !file._firstLine) continue;
+    updateFirstLineElement(item, file._firstLine);
+  }
+}
+
+function updateFirstLineElement(item, text) {
+  const existing = item.querySelector('.first-line');
+  if (existing) {
+    existing.textContent = text;
+    return;
+  }
+
+  const firstLineEl = document.createElement('span');
+  firstLineEl.className = 'first-line';
+  firstLineEl.textContent = text;
+
+  if (item.classList.contains('recent-item')) {
+    const recentName = item.querySelector('.recent-name');
+    recentName?.appendChild(firstLineEl);
+    return;
+  }
+
+  const nameEl = item.querySelector('.name');
+  nameEl?.insertAdjacentElement('afterend', firstLineEl);
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
+
+function resetFileTextCache() {
+  cachedTextSize = 0;
+  cachedTextLru.clear();
+}
+
+function setCachedText(file, text) {
+  const prevSize = cachedTextLru.get(file.path) || 0;
+  if (prevSize) {
+    cachedTextSize -= prevSize;
+  }
+
+  file._cachedText = text;
+  touchCachedText(file.path, text.length);
+  cachedTextSize += text.length;
+  trimCachedTextCache(file.path);
+}
+
+function touchCachedText(path, size) {
+  cachedTextLru.delete(path);
+  cachedTextLru.set(path, size);
+}
+
+function trimCachedTextCache(protectedPath) {
+  while (cachedTextSize > MAX_CACHED_TEXT_CHARS && cachedTextLru.size > 1) {
+    const oldestEntry = cachedTextLru.entries().next().value;
+    if (!oldestEntry) return;
+
+    const [path, size] = oldestEntry;
+    if (path === protectedPath || path === currentFilePath) {
+      cachedTextLru.delete(path);
+      cachedTextLru.set(path, size);
+      continue;
+    }
+
+    cachedTextLru.delete(path);
+    cachedTextSize -= size;
+
+    const file = allFiles.find((candidate) => candidate.path === path);
+    if (file) {
+      delete file._cachedText;
+    }
+  }
 }
 
 // === Build tree structure from flat file list ===
@@ -395,10 +532,12 @@ function buildTree(files) {
 // === Render tree ===
 function renderTree(root) {
   treeEl.innerHTML = '';
-  renderNode(root, treeEl, 0, '');
+  treeEl.appendChild(renderNode(root, 0, ''));
+  restoreActiveFileSelection(treeEl);
 }
 
-function renderNode(node, parentEl, depth, parentPath) {
+function renderNode(node, depth, parentPath) {
+  const fragment = document.createDocumentFragment();
   const dirs = [...node.children.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   const files = [...node.files].sort((a, b) => a.path.localeCompare(b.path));
 
@@ -414,24 +553,21 @@ function renderNode(node, parentEl, depth, parentPath) {
     if (child.hidden) item.classList.add('dir-hidden');
     item.style.paddingLeft = `${8 + depth * 16}px`;
     item.innerHTML = `<span class="icon">&#9654;</span><span class="name">${esc(name)}</span>`;
+    item.setAttribute('aria-expanded', 'false');
 
     const childContainer = document.createElement('div');
     childContainer.className = 'tree-children';
 
-    if (depth < 2) {
-      childContainer.classList.add('open');
-      item.querySelector('.icon').innerHTML = '&#9660;';
-    }
-
     item.addEventListener('click', () => {
       const isOpen = childContainer.classList.toggle('open');
       item.querySelector('.icon').innerHTML = isOpen ? '&#9660;' : '&#9654;';
+      item.setAttribute('aria-expanded', String(isOpen));
     });
 
     wrapper.appendChild(item);
-    renderNode(child, childContainer, depth + 1, dirPath);
+    childContainer.appendChild(renderNode(child, depth + 1, dirPath));
     wrapper.appendChild(childContainer);
-    parentEl.appendChild(wrapper);
+    fragment.appendChild(wrapper);
   }
 
   for (const f of files) {
@@ -448,8 +584,10 @@ function renderNode(node, parentEl, depth, parentPath) {
     item.innerHTML = `<span class="icon">&#9776;</span><span class="name">${esc(fileName)}</span>${firstLine}`;
 
     item.addEventListener('click', () => openFile(f, item));
-    parentEl.appendChild(item);
+    fragment.appendChild(item);
   }
+
+  return fragment;
 }
 
 // === Open file ===
@@ -466,11 +604,10 @@ async function openFile(f, itemEl, options = {}) {
 
   breadcrumbEl.textContent = f.path.split('/').join(' \u203A ');
 
-  const text = f._cachedText || (await f.read());
+  const text = await readFileText(f);
   currentFilePath = f.path;
   currentFileRawText = text;
-  contentEl.innerHTML = marked.parse(text);
-  configureRenderedLinks();
+  await renderMarkdownContent(text);
   contentEl.scrollTop = scrollTop;
   updateCopyRawButtonState();
 
@@ -490,23 +627,82 @@ async function openFile(f, itemEl, options = {}) {
   }
 }
 
+async function renderMarkdownContent(text) {
+  const renderToken = ++contentRenderToken;
+  contentEl.innerHTML = marked.parse(text);
+  prepareMermaidBlocks();
+  await renderMermaidDiagrams(renderToken);
+  if (renderToken !== contentRenderToken) return;
+  configureRenderedLinks();
+}
+
+function prepareMermaidBlocks() {
+  const mermaidCodeBlocks = contentEl.querySelectorAll('pre code.language-mermaid, pre code.lang-mermaid');
+
+  for (const codeEl of mermaidCodeBlocks) {
+    const preEl = codeEl.closest('pre');
+    if (!preEl) continue;
+
+    const mermaidBlock = document.createElement('div');
+    mermaidBlock.className = 'mermaid';
+    mermaidBlock.textContent = codeEl.textContent || '';
+    preEl.replaceWith(mermaidBlock);
+  }
+}
+
+async function renderMermaidDiagrams(renderToken) {
+  const mermaidBlocks = [...contentEl.querySelectorAll('.mermaid')];
+  if (!mermaidBlocks.length) return;
+
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: getMermaidTheme(),
+  });
+
+  try {
+    await mermaid.run({
+      nodes: mermaidBlocks,
+      suppressErrors: true,
+    });
+    if (renderToken !== contentRenderToken) return;
+  } catch (error) {
+    console.error('Mermaid 렌더링에 실패했습니다:', error);
+  }
+}
+
+function getMermaidTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'default' : 'dark';
+}
+
+async function rerenderCurrentContent() {
+  if (!currentFilePath || !currentFileRawText) return;
+
+  const scrollTop = contentEl.scrollTop;
+  await renderMarkdownContent(currentFileRawText);
+  contentEl.scrollTop = scrollTop;
+}
+
 // === Search ===
 let searchTimeout = null;
 
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => runSearch(searchInput.value.trim()), 150);
+  searchTimeout = setTimeout(() => {
+    void runSearch(searchInput.value.trim());
+  }, 150);
 });
 
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     searchInput.value = '';
-    searchResults.classList.add('hidden');
-    treeEl.style.display = '';
+    void runSearch('');
   }
 });
 
-function runSearch(query) {
+async function runSearch(query) {
+  const currentRequestId = ++searchRequestId;
+
   if (!query) {
     searchResults.classList.add('hidden');
     treeEl.style.display = '';
@@ -514,25 +710,71 @@ function runSearch(query) {
   }
 
   const lower = query.toLowerCase();
-  const matches = allFiles.filter((f) => {
-    const inPath = f.path.toLowerCase().includes(lower);
-    const inContent = f._cachedText && f._cachedText.toLowerCase().includes(lower);
-    return inPath || inContent;
-  });
-
-  searchResults.innerHTML = '';
   treeEl.style.display = 'none';
   searchResults.classList.remove('hidden');
 
-  if (matches.length === 0) {
+  const matches = allFiles.filter((f) => f.path.toLowerCase().includes(lower));
+  const seenPaths = new Set(matches.map((f) => f.path));
+
+  const contentCandidates = allFiles.filter((f) => !seenPaths.has(f.path));
+  renderSearchResults(matches, lower, { isSearchingContent: contentCandidates.length > 0 });
+
+  if (!contentCandidates.length) {
+    return;
+  }
+
+  for (let i = 0; i < contentCandidates.length; i += SEARCH_CONTENT_BATCH) {
+    if (currentRequestId !== searchRequestId) return;
+
+    const batch = contentCandidates.slice(i, i + SEARCH_CONTENT_BATCH);
+    const batchMatches = await Promise.all(
+      batch.map(async (f) => {
+        const text = await readFileText(f);
+        return text.toLowerCase().includes(lower) ? f : null;
+      }),
+    );
+
+    for (const match of batchMatches) {
+      if (!match) continue;
+      matches.push(match);
+      seenPaths.add(match.path);
+    }
+
+    if (currentRequestId !== searchRequestId) return;
+
+    renderSearchResults(matches, lower, {
+      isSearchingContent: i + SEARCH_CONTENT_BATCH < contentCandidates.length,
+    });
+    await yieldToBrowser();
+  }
+}
+
+function renderSearchResults(matches, lower, options = {}) {
+  const { isSearchingContent = false } = options;
+
+  searchResults.innerHTML = '';
+
+  if (matches.length === 0 && !isSearchingContent) {
     searchResults.innerHTML = '<div class="search-empty">검색 결과가 없습니다</div>';
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   const countEl = document.createElement('div');
   countEl.className = 'search-count';
-  countEl.textContent = `${matches.length}개 결과`;
-  searchResults.appendChild(countEl);
+  countEl.textContent = isSearchingContent
+    ? `${matches.length}개 결과 · 문서 내용 검색 중...`
+    : `${matches.length}개 결과`;
+  fragment.appendChild(countEl);
+
+  if (matches.length === 0) {
+    const loadingEl = document.createElement('div');
+    loadingEl.className = 'search-empty';
+    loadingEl.textContent = '문서 내용을 검색 중...';
+    fragment.appendChild(loadingEl);
+    searchResults.appendChild(fragment);
+    return;
+  }
 
   for (const f of matches) {
     const item = document.createElement('div');
@@ -554,8 +796,10 @@ function runSearch(query) {
     `;
 
     item.addEventListener('click', () => openFile(f, item));
-    searchResults.appendChild(item);
+    fragment.appendChild(item);
   }
+
+  searchResults.appendChild(fragment);
 }
 
 function getSearchSnippet(text, query) {
@@ -607,8 +851,9 @@ viewModeBtn.addEventListener('click', () => {
 // === Render recent updates list ===
 function renderRecentList(files) {
   treeEl.innerHTML = '';
-  const visible = showHiddenFiles ? files : files.filter(f => !f.hidden);
+  const visible = showHiddenFiles ? files : files.filter((f) => !f.hidden);
   const sorted = [...visible].sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+  const fragment = document.createDocumentFragment();
 
   for (const f of sorted) {
     const item = document.createElement('div');
@@ -637,8 +882,11 @@ function renderRecentList(files) {
     `;
 
     item.addEventListener('click', () => openFile(f, item));
-    treeEl.appendChild(item);
+    fragment.appendChild(item);
   }
+
+  treeEl.appendChild(fragment);
+  restoreActiveFileSelection(treeEl);
 }
 
 function formatRelativeTime(ts) {
@@ -659,11 +907,13 @@ function formatRelativeTime(ts) {
 foldAllBtn.addEventListener('click', () => {
   treeEl.querySelectorAll('.tree-children').forEach((el) => el.classList.remove('open'));
   treeEl.querySelectorAll('.tree-dir > .icon').forEach((el) => (el.innerHTML = '&#9654;'));
+  treeEl.querySelectorAll('.tree-item.tree-dir').forEach((el) => el.setAttribute('aria-expanded', 'false'));
 });
 
 unfoldAllBtn.addEventListener('click', () => {
   treeEl.querySelectorAll('.tree-children').forEach((el) => el.classList.add('open'));
   treeEl.querySelectorAll('.tree-dir > .icon').forEach((el) => (el.innerHTML = '&#9660;'));
+  treeEl.querySelectorAll('.tree-item.tree-dir').forEach((el) => el.setAttribute('aria-expanded', 'true'));
 });
 
 // === Theme toggle ===
@@ -691,10 +941,14 @@ function applyTheme() {
 document.getElementById('themeToggle').addEventListener('click', () => {
   themeIndex = (themeIndex + 1) % THEMES.length;
   applyTheme();
+  void rerenderCurrentContent();
 });
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if (THEMES[themeIndex] === 'system') applyTheme();
+  if (THEMES[themeIndex] === 'system') {
+    applyTheme();
+    void rerenderCurrentContent();
+  }
 });
 
 applyTheme();
@@ -735,6 +989,13 @@ function findFileItemByPath(path, rootEl = treeEl) {
     }
   }
   return null;
+}
+
+function restoreActiveFileSelection(rootEl = treeEl) {
+  if (!currentFilePath) return;
+
+  const activeItem = findFileItemByPath(currentFilePath, rootEl);
+  activeItem?.classList.add('active');
 }
 
 function startAutoRefresh() {
@@ -811,6 +1072,7 @@ function restoreTreeState(state) {
     container.classList.toggle('open', isOpen);
     const icon = dirItem.querySelector('.icon');
     if (icon) icon.innerHTML = isOpen ? '&#9660;' : '&#9654;';
+    dirItem.setAttribute('aria-expanded', String(isOpen));
   });
 
   treeEl.scrollTop = state.treeScrollTop || 0;
@@ -992,6 +1254,8 @@ function initButtons() {
 }
 
 hiddenToggleBtn.addEventListener('click', () => {
+  const previousTreeState = viewMode === 'tree' ? captureTreeState() : null;
+
   showHiddenFiles = !showHiddenFiles;
   localStorage.setItem('md-viewer-show-hidden', showHiddenFiles);
 
@@ -1003,6 +1267,7 @@ hiddenToggleBtn.addEventListener('click', () => {
   if (viewMode === 'tree') {
     const tree = buildTree(allFiles);
     renderTree(tree);
+    restoreTreeState(previousTreeState);
   } else {
     renderRecentList(allFiles);
   }
