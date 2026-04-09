@@ -57,29 +57,43 @@ export async function pickDirectoryNative() {
 /**
  * FileSystemDirectoryHandle에서 .md 파일 재귀 스캔
  */
-export async function scanDirectoryHandle(dirHandle, prefix = '') {
+export async function scanDirectoryHandle(dirHandle, prefix = '', options = {}) {
+  const { includeReaders = true } = options;
   const results = [];
   for await (const entry of dirHandle.values()) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     const isHiddenEntry = entry.name.startsWith('.');
-      if (entry.kind === 'file' && isAllowedFile(entry.name)) {
-        const file = await entry.getFile();
-        results.push({
-          path,
-          lastModified: file.lastModified,
-          hidden: isHiddenEntry,
-          read: () => file.text(),
-          readHead: (maxBytes = 4096) => file.slice(0, maxBytes).text(),
-        });
-      } else if (entry.kind === 'directory' && entry.name !== 'node_modules') {
-        const children = await scanDirectoryHandle(entry, path);
-        if (isHiddenEntry) {
-          children.forEach((c) => {
-            c.hidden = true;
-          });
-        }
-        results.push(...children);
+    if (entry.kind === 'file' && isAllowedFile(entry.name)) {
+      const file = await entry.getFile();
+      const lastModified = file.lastModified;
+
+      const fileEntry = {
+        path,
+        lastModified,
+        hidden: isHiddenEntry,
+      };
+
+      if (includeReaders) {
+        fileEntry.read = async () => {
+          const snapshot = await entry.getFile();
+          return snapshot.text();
+        };
+        fileEntry.readHead = async (maxBytes = 4096) => {
+          const snapshot = await entry.getFile();
+          return snapshot.slice(0, maxBytes).text();
+        };
       }
+
+      results.push(fileEntry);
+    } else if (entry.kind === 'directory' && entry.name !== 'node_modules') {
+      const children = await scanDirectoryHandle(entry, path, options);
+      if (isHiddenEntry) {
+        children.forEach((c) => {
+          c.hidden = true;
+        });
+      }
+      results.push(...children);
+    }
   }
   return results;
 }

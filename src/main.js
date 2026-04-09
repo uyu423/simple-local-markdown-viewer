@@ -304,6 +304,7 @@ async function showEditor(rootName, mdFiles, options = {}) {
   editor.classList.remove('hidden');
   rootNameEl.textContent = rootName;
 
+  releaseFileResources(allFiles);
   allFiles = mdFiles;
   resetFileTextCache();
   searchRequestId += 1;
@@ -422,14 +423,18 @@ function extractFirstLine(text) {
   return '';
 }
 
-async function readFileText(file) {
-  if (typeof file._cachedText === 'string') {
+async function readFileText(file, options = {}) {
+  const { useCache = true } = options;
+
+  if (useCache && typeof file._cachedText === 'string') {
     touchCachedText(file.path, file._cachedText.length);
     return file._cachedText;
   }
 
   const text = await file.read();
-  setCachedText(file, text);
+  if (useCache) {
+    setCachedText(file, text);
+  }
   return text;
 }
 
@@ -438,7 +443,15 @@ async function readFilePreview(file) {
     return file.readHead(FIRST_LINE_PREVIEW_BYTES);
   }
 
-  return readFileText(file);
+  return readFileText(file, { useCache: false });
+}
+
+function releaseFileResources(files) {
+  for (const file of files) {
+    delete file._cachedText;
+    delete file._firstLine;
+    delete file._firstLineLoaded;
+  }
 }
 
 function updateVisibleFirstLines(files) {
@@ -487,6 +500,13 @@ function setCachedText(file, text) {
   const prevSize = cachedTextLru.get(file.path) || 0;
   if (prevSize) {
     cachedTextSize -= prevSize;
+  }
+
+  cachedTextLru.delete(file.path);
+
+  if (text.length > MAX_CACHED_TEXT_CHARS) {
+    delete file._cachedText;
+    return;
   }
 
   file._cachedText = text;
@@ -759,6 +779,7 @@ searchInput.addEventListener('keydown', (e) => {
 
 async function runSearch(query) {
   const currentRequestId = ++searchRequestId;
+  const snippetsByPath = new Map();
 
   if (!query) {
     searchResults.classList.add('hidden');
@@ -774,7 +795,10 @@ async function runSearch(query) {
   const seenPaths = new Set(matches.map((f) => f.path));
 
   const contentCandidates = allFiles.filter((f) => !seenPaths.has(f.path));
-  renderSearchResults(matches, lower, { isSearchingContent: contentCandidates.length > 0 });
+  renderSearchResults(matches, lower, {
+    isSearchingContent: contentCandidates.length > 0,
+    snippetsByPath,
+  });
 
   if (!contentCandidates.length) {
     return;
@@ -786,28 +810,36 @@ async function runSearch(query) {
     const batch = contentCandidates.slice(i, i + SEARCH_CONTENT_BATCH);
     const batchMatches = await Promise.all(
       batch.map(async (f) => {
-        const text = await readFileText(f);
-        return text.toLowerCase().includes(lower) ? f : null;
+        const text = await readFileText(f, { useCache: false });
+        if (!text.toLowerCase().includes(lower)) return null;
+        return {
+          file: f,
+          snippet: getSearchSnippet(text, lower),
+        };
       }),
     );
 
     for (const match of batchMatches) {
       if (!match) continue;
-      matches.push(match);
-      seenPaths.add(match.path);
+      matches.push(match.file);
+      seenPaths.add(match.file.path);
+      if (match.snippet) {
+        snippetsByPath.set(match.file.path, match.snippet);
+      }
     }
 
     if (currentRequestId !== searchRequestId) return;
 
     renderSearchResults(matches, lower, {
       isSearchingContent: i + SEARCH_CONTENT_BATCH < contentCandidates.length,
+      snippetsByPath,
     });
     await yieldToBrowser();
   }
 }
 
 function renderSearchResults(matches, lower, options = {}) {
-  const { isSearchingContent = false } = options;
+  const { isSearchingContent = false, snippetsByPath = new Map() } = options;
 
   searchResults.innerHTML = '';
 
@@ -841,7 +873,7 @@ function renderSearchResults(matches, lower, options = {}) {
 
     const fileName = f.path.split('/').pop();
     const dirPath = f.path.split('/').slice(0, -1).join('/');
-    const snippet = getSearchSnippet(f._cachedText, lower);
+    const snippet = snippetsByPath.get(f.path) || getSearchSnippet(f._cachedText, lower);
 
     item.innerHTML = `
       <span class="icon">&#9776;</span>
@@ -1077,10 +1109,12 @@ async function refreshInBackground() {
 
   isAutoRefreshing = true;
   try {
-    const mdFiles = await scanDirectoryHandle(currentHandle);
-    if (!hasFileListChanged(allFiles, mdFiles)) {
+    const scannedFiles = await scanDirectoryHandle(currentHandle, '', { includeReaders: false });
+    if (!hasFileListChanged(allFiles, scannedFiles)) {
       return;
     }
+
+    const mdFiles = await scanDirectoryHandle(currentHandle);
 
     await showEditor(currentHandle.name, mdFiles, { preserveUiState: true });
   } catch (e) {
