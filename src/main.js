@@ -97,6 +97,7 @@ let viewMode = 'tree'; // 'tree' | 'recent'
 let currentHandle = null;
 let currentFilePath = '';
 let currentFileRawText = '';
+let currentContentHasMermaid = false;
 let autoRefreshTimer = null;
 let isAutoRefreshing = false;
 let showHiddenFiles = localStorage.getItem('md-viewer-show-hidden') === 'true';
@@ -106,6 +107,7 @@ let searchRequestId = 0;
 let firstLinePreloadToken = 0;
 let contentRenderToken = 0;
 let cachedTextSize = 0;
+let appliedMermaidTheme = '';
 const cachedTextLru = new Map();
 let readHistory;
 try {
@@ -292,12 +294,16 @@ async function loadFromHandle(handle, options = {}) {
 
 // === Show editor with files ===
 async function showEditor(rootName, mdFiles, options = {}) {
-  const { preserveUiState = false } = options;
+  const { preserveUiState = false, refreshSearchResults = true } = options;
+  const previousFiles = preserveUiState ? allFiles : [];
   const previousFilePath = preserveUiState ? currentFilePath : '';
   const previousSearchQuery = preserveUiState ? searchInput.value.trim() : '';
   const previousContentScrollTop = preserveUiState ? contentEl.scrollTop : 0;
   const previousTreeState = preserveUiState ? captureTreeState() : null;
   const previousSearchScrollTop = preserveUiState ? searchResults.scrollTop : 0;
+  const previousFile = preserveUiState && previousFilePath
+    ? previousFiles.find((file) => file.path === previousFilePath) || null
+    : null;
   const requestedFilePathFromUrl = preserveUiState ? '' : getFilePathFromUrl();
 
   landing.style.display = 'none';
@@ -324,9 +330,15 @@ async function showEditor(rootName, mdFiles, options = {}) {
   if (preserveUiState) {
     if (previousSearchQuery) {
       searchInput.value = previousSearchQuery;
-      void runSearch(previousSearchQuery).then(() => {
+      if (refreshSearchResults) {
+        void runSearch(previousSearchQuery).then(() => {
+          searchResults.scrollTop = previousSearchScrollTop;
+        });
+      } else {
+        treeEl.style.display = 'none';
+        searchResults.classList.remove('hidden');
         searchResults.scrollTop = previousSearchScrollTop;
-      });
+      }
     } else {
       searchInput.value = '';
       searchResults.classList.add('hidden');
@@ -338,10 +350,18 @@ async function showEditor(rootName, mdFiles, options = {}) {
     if (previousFilePath) {
       const fileToRestore = allFiles.find((f) => f.path === previousFilePath);
       if (fileToRestore) {
-        await openFileByPath(previousFilePath, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false, updateHistory: false });
+        if (canReuseRenderedFile(previousFile, fileToRestore)) {
+          currentFilePath = fileToRestore.path;
+          breadcrumbEl.textContent = fileToRestore.path.split('/').join(' \u203A ');
+          contentEl.scrollTop = previousContentScrollTop;
+          updateCopyRawButtonState();
+        } else {
+          await openFileByPath(previousFilePath, { scrollTop: previousContentScrollTop, scrollIntoView: false, trackRead: false, updateHistory: false });
+        }
       } else {
         currentFilePath = '';
         currentFileRawText = '';
+        currentContentHasMermaid = false;
         contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
         breadcrumbEl.textContent = '';
         updateCopyRawButtonState();
@@ -359,6 +379,7 @@ async function showEditor(rootName, mdFiles, options = {}) {
 
     currentFilePath = '';
     currentFileRawText = '';
+    currentContentHasMermaid = false;
     contentEl.innerHTML = '<div class="empty-state">왼쪽에서 .md 파일을 선택하세요</div>';
     breadcrumbEl.textContent = '';
     searchInput.value = '';
@@ -669,6 +690,7 @@ async function renderMarkdownContent(text) {
   const renderToken = ++contentRenderToken;
   contentEl.innerHTML = marked.parse(text);
   prepareMermaidBlocks();
+  currentContentHasMermaid = contentEl.querySelector('.mermaid') !== null;
   enhanceCodeBlocks();
   await renderMermaidDiagrams(renderToken);
   if (renderToken !== contentRenderToken) return;
@@ -721,11 +743,7 @@ async function renderMermaidDiagrams(renderToken) {
   const mermaidBlocks = [...contentEl.querySelectorAll('.mermaid')];
   if (!mermaidBlocks.length) return;
 
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: getMermaidTheme(),
-  });
+  ensureMermaidInitialized();
 
   try {
     await mermaid.run({
@@ -742,6 +760,18 @@ function getMermaidTheme() {
   return getResolvedTheme() === 'light' ? 'default' : 'dark';
 }
 
+function ensureMermaidInitialized() {
+  const nextTheme = getMermaidTheme();
+  if (appliedMermaidTheme === nextTheme) return;
+
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: nextTheme,
+  });
+  appliedMermaidTheme = nextTheme;
+}
+
 function getResolvedTheme() {
   return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
 }
@@ -753,7 +783,7 @@ function applyHighlightTheme() {
 }
 
 async function rerenderCurrentContent() {
-  if (!currentFilePath || !currentFileRawText) return;
+  if (!currentFilePath || !currentFileRawText || !currentContentHasMermaid) return;
 
   const scrollTop = contentEl.scrollTop;
   await renderMarkdownContent(currentFileRawText);
@@ -1042,6 +1072,17 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
   }
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopAutoRefresh();
+    return;
+  }
+
+  if (autoRefreshEnabled) {
+    startAutoRefresh();
+  }
+});
+
 applyTheme();
 
 // === Resizer ===
@@ -1091,9 +1132,10 @@ function restoreActiveFileSelection(rootEl = treeEl) {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  if (!supportsDirectoryPicker || !currentHandle || !autoRefreshEnabled) return;
+  if (!supportsDirectoryPicker || !currentHandle || !autoRefreshEnabled || document.hidden) return;
 
   autoRefreshTimer = window.setInterval(() => {
+    if (document.hidden) return;
     refreshInBackground();
   }, AUTO_REFRESH_INTERVAL_MS);
 }
@@ -1105,7 +1147,8 @@ function stopAutoRefresh() {
 }
 
 async function refreshInBackground() {
-  if (!supportsDirectoryPicker || !currentHandle || isAutoRefreshing) return;
+  if (!supportsDirectoryPicker || !currentHandle || isAutoRefreshing || document.hidden) return;
+  if (searchInput.value.trim()) return;
 
   isAutoRefreshing = true;
   try {
@@ -1116,12 +1159,20 @@ async function refreshInBackground() {
 
     const mdFiles = await scanDirectoryHandle(currentHandle);
 
-    await showEditor(currentHandle.name, mdFiles, { preserveUiState: true });
+    await showEditor(currentHandle.name, mdFiles, { preserveUiState: true, refreshSearchResults: false });
   } catch (e) {
     if (e.name !== 'AbortError') console.error(e);
   } finally {
     isAutoRefreshing = false;
   }
+}
+
+function canReuseRenderedFile(previousFile, nextFile) {
+  if (!previousFile || !nextFile) return false;
+  if (!currentFileRawText) return false;
+
+  return previousFile.path === nextFile.path
+    && (previousFile.lastModified || 0) === (nextFile.lastModified || 0);
 }
 
 function hasFileListChanged(prevFiles, nextFiles) {
