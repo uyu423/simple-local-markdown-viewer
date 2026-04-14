@@ -472,6 +472,8 @@ function releaseFileResources(files) {
     delete file._cachedText;
     delete file._firstLine;
     delete file._firstLineLoaded;
+    delete file.read;
+    delete file.readHead;
   }
 }
 
@@ -542,17 +544,21 @@ function touchCachedText(path, size) {
 }
 
 function trimCachedTextCache(protectedPath) {
+  const skipped = new Set();
   while (cachedTextSize > MAX_CACHED_TEXT_CHARS && cachedTextLru.size > 1) {
     const oldestEntry = cachedTextLru.entries().next().value;
     if (!oldestEntry) return;
 
     const [path, size] = oldestEntry;
     if (path === protectedPath || path === currentFilePath) {
+      if (skipped.has(path)) return; // 모든 남은 항목이 보호 대상이면 탈출
+      skipped.add(path);
       cachedTextLru.delete(path);
       cachedTextLru.set(path, size);
       continue;
     }
 
+    skipped.clear();
     cachedTextLru.delete(path);
     cachedTextSize -= size;
 
@@ -677,6 +683,13 @@ async function openFile(f, itemEl, options = {}) {
   if (trackRead) {
     // 읽음 기록 저장
     readHistory[f.path] = Date.now();
+    const historyKeys = Object.keys(readHistory);
+    if (historyKeys.length > 1000) {
+      historyKeys
+        .sort((a, b) => readHistory[a] - readHistory[b])
+        .slice(0, 200)
+        .forEach((k) => delete readHistory[k]);
+    }
     try { localStorage.setItem('md-viewer-read-history', JSON.stringify(readHistory)); } catch {}
 
     // recent 뷰에서 즉시 읽음 상태 반영
