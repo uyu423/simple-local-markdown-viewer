@@ -135,6 +135,8 @@ function resolveLinkedFilePath(href, currentPath, files) {
   return normalizePath(baseDir ? `${baseDir}/${decodedPath}` : decodedPath);
 }
 
+export { isLocalFileLink, normalizePath, resolveLinkedFilePath };
+
 export function setupContentLinkHandling({
   contentEl,
   getAllFiles,

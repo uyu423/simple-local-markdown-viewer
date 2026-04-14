@@ -7,4 +7,8 @@ export default defineConfig({
     outDir: 'docs',
     emptyOutDir: false,
   },
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.js'],
+  },
 });
