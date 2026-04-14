@@ -12,3 +12,6 @@ node_modules/.vite/
 
 # Local agent/runtime artifacts
 .omc/
+
+# Test coverage
+coverage/
